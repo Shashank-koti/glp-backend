@@ -705,12 +705,13 @@ export const crmCreateSubProduct = async (req, res, next) => {
       isActive,
     } = req.body;
 
+    // 1. Chemical & Impurity Identification
     if (!name || !name.trim()) {
-      return res.status(400).json({ success: false, message: 'SubProduct name is required.' });
+      return res.status(400).json({ success: false, message: 'Impurity standard name is required.' });
     }
 
     if (!mainProduct) {
-      return res.status(400).json({ success: false, message: 'Main product is required.' });
+      return res.status(400).json({ success: false, message: 'Main product (Parent API) is required.' });
     }
 
     if (!mongoose.isValidObjectId(mainProduct)) {
@@ -729,6 +730,90 @@ export const crmCreateSubProduct = async (req, res, next) => {
     }
     if (!subCategoryDoc && (mainProductDoc.category || mainProductDoc.category_id)) {
       subCategoryDoc = await resolveCategoryDoc(mainProductDoc.category || mainProductDoc.category_id);
+    }
+
+    if (!subCategoryDoc) {
+      return res.status(400).json({ success: false, message: 'Category destination is required.' });
+    }
+
+    if (!availability || !availability.trim()) {
+      return res.status(400).json({ success: false, message: 'Commercial availability is required.' });
+    }
+
+    // Chemical structure image check
+    const hasImagePayload = Boolean(
+      (image && typeof image === 'string' && image.trim()) ||
+      (req.files?.image && req.files.image[0]) ||
+      (req.files?.file && req.files.file[0]) ||
+      req.file
+    );
+    if (!hasImagePayload) {
+      return res.status(400).json({ success: false, message: 'Chemical structure image is required.' });
+    }
+
+    // 2. Technical & Chemical Specifications validation
+    let specs = specifications;
+    if (typeof specs === 'string') {
+      try {
+        specs = JSON.parse(specs);
+      } catch (e) {
+        specs = {};
+      }
+    }
+    specs = specs || {};
+
+    const requiredSpecs = [
+      { key: 'casNumber', label: 'CAS Number' },
+      { key: 'catalogueNumber', label: 'Catalogue Number' },
+      { key: 'purity', label: 'Purity' },
+      { key: 'molecularFormula', label: 'Molecular Formula' },
+      { key: 'molecularWeight', label: 'Molecular Weight' },
+      { key: 'appearance', label: 'Physical Appearance' },
+      { key: 'storage', label: 'Storage Conditions' },
+      { key: 'shippingConditions', label: 'Shipping Conditions' },
+      { key: 'iupacName', label: 'IUPAC Chemical Name' },
+    ];
+
+    for (const specItem of requiredSpecs) {
+      if (!specs[specItem.key] || !String(specs[specItem.key]).trim()) {
+        return res.status(400).json({
+          success: false,
+          message: `${specItem.label} is required under Technical & Chemical Specifications.`,
+        });
+      }
+    }
+
+    // 3. Commercial Quantities & Pricing Tiers validation
+    let tiers = pricingTiers;
+    if (typeof tiers === 'string') {
+      try {
+        tiers = JSON.parse(tiers);
+      } catch (e) {
+        tiers = [];
+      }
+    }
+
+    if (!Array.isArray(tiers) || tiers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'At least one commercial pricing tier (Unit Size and Price) is required.',
+      });
+    }
+
+    const validTiers = tiers
+      .filter((t) => t && t.size && String(t.size).trim() && t.price !== undefined && t.price !== null && !isNaN(Number(t.price)) && Number(t.price) >= 0)
+      .map((t) => ({
+        size: String(t.size).trim(),
+        price: Number(t.price),
+        description: t.description ? String(t.description).trim() : '',
+        isBestValue: Boolean(t.isBestValue),
+      }));
+
+    if (validTiers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Each commercial pricing tier must have a valid unit size and non-negative price.',
+      });
     }
 
     let finalSlug = slug?.trim() ? slugGenerator(slug) : slugGenerator(name);
@@ -762,8 +847,8 @@ export const crmCreateSubProduct = async (req, res, next) => {
       category: subCategoryDoc ? subCategoryDoc._id : undefined,
       category_id: subCategoryDoc ? subCategoryDoc.categoryId : undefined,
       productType,
-      specifications: specifications || {},
-      pricingTiers: pricingTiers || [],
+      specifications: specs,
+      pricingTiers: validTiers,
       similarProducts: similarProducts || [],
       availability: availability || 'In Stock',
       isFeatured: isFeatured !== undefined ? isFeatured : false,
@@ -840,7 +925,10 @@ export const crmUpdateSubProduct = async (req, res, next) => {
       subProduct.mainProduct = mainProductDoc._id;
     }
 
-    if (req.body.name) {
+    if (req.body.name !== undefined) {
+      if (!req.body.name || !req.body.name.trim()) {
+        return res.status(400).json({ success: false, message: 'Impurity name cannot be empty.' });
+      }
       subProduct.name = req.body.name.trim();
       if (!req.body.slug) {
         subProduct.slug = slugGenerator(req.body.name);
@@ -886,25 +974,81 @@ export const crmUpdateSubProduct = async (req, res, next) => {
       subProduct.image = savedImg.url;
       subProduct.imagePublicId = savedImg.public_id;
     } else if (req.body?.removeImage === true || req.body?.removeImage === 'true') {
+      const hasReplacementImage = Boolean(
+        (req.files?.image && req.files.image[0]) ||
+        (req.body.image && typeof req.body.image === 'string' && req.body.image.trim())
+      );
+      if (!hasReplacementImage) {
+        return res.status(400).json({
+          success: false,
+          message: 'Chemical structure image is compulsory and cannot be removed without a replacement.',
+        });
+      }
       if (subProduct.imagePublicId || (subProduct.image && subProduct.image.includes('cloudinary.com'))) {
         await deleteImageFile(subProduct.imagePublicId || subProduct.image);
       }
       subProduct.image = '';
       subProduct.imagePublicId = '';
     } else if (req.body.image !== undefined) {
-      subProduct.image = req.body.image;
+      if (!req.body.image || !req.body.image.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Chemical structure image cannot be set to empty.',
+        });
+      }
+      subProduct.image = req.body.image.trim();
     }
     if (req.body.description !== undefined) subProduct.description = req.body.description;
     if (req.body.productType !== undefined) subProduct.productType = req.body.productType;
 
     if (req.body.specifications) {
+      let updatedSpecs = req.body.specifications;
+      if (typeof updatedSpecs === 'string') {
+        try {
+          updatedSpecs = JSON.parse(updatedSpecs);
+        } catch (e) {
+          updatedSpecs = {};
+        }
+      }
       const currentSpecs = subProduct.specifications ? subProduct.specifications.toObject() : {};
-      subProduct.specifications = { ...currentSpecs, ...req.body.specifications };
+      subProduct.specifications = { ...currentSpecs, ...updatedSpecs };
     }
 
-    if (req.body.pricingTiers !== undefined) subProduct.pricingTiers = req.body.pricingTiers;
+    if (req.body.pricingTiers !== undefined) {
+      let updatedTiers = req.body.pricingTiers;
+      if (typeof updatedTiers === 'string') {
+        try {
+          updatedTiers = JSON.parse(updatedTiers);
+        } catch (e) {
+          updatedTiers = [];
+        }
+      }
+      if (Array.isArray(updatedTiers)) {
+        const validUpdatedTiers = updatedTiers
+          .filter((t) => t && t.size && String(t.size).trim() && t.price !== undefined && t.price !== null && !isNaN(Number(t.price)) && Number(t.price) >= 0)
+          .map((t) => ({
+            size: String(t.size).trim(),
+            price: Number(t.price),
+            description: t.description ? String(t.description).trim() : '',
+            isBestValue: Boolean(t.isBestValue),
+          }));
+
+        if (validUpdatedTiers.length === 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'At least one commercial pricing tier (Unit Size and non-negative Price) is required.',
+          });
+        }
+        subProduct.pricingTiers = validUpdatedTiers;
+      }
+    }
     if (req.body.similarProducts !== undefined) subProduct.similarProducts = req.body.similarProducts;
-    if (req.body.availability !== undefined) subProduct.availability = req.body.availability;
+    if (req.body.availability !== undefined) {
+      if (!req.body.availability || !req.body.availability.trim()) {
+        return res.status(400).json({ success: false, message: 'Commercial availability cannot be empty.' });
+      }
+      subProduct.availability = req.body.availability.trim();
+    }
     if (req.body.isFeatured !== undefined) subProduct.isFeatured = req.body.isFeatured;
     if (req.body.isActive !== undefined) subProduct.isActive = req.body.isActive;
 

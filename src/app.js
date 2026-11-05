@@ -41,10 +41,10 @@ app.use(cors({
   credentials: true
 }));
 
-// Rate limiting
+// Rate limiting (generous in development so rapid page reloads/Vite HMR are not throttled)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  max: process.env.NODE_ENV === 'production' ? 100 : 5000,
   message: 'Too many requests from this IP, please try again in 15 minutes'
 });
 app.use('/api', limiter);
