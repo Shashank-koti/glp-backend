@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import cloudinary from '../config/cloudinary.js';
+import cloudinary, { isCloudinaryConfigured } from '../config/cloudinary.js';
+
+export { isCloudinaryConfigured };
 
 // Canonical document types
 export const DOCUMENT_TYPES = ['msds', 'draftCoa', 'coa'];
@@ -48,31 +50,7 @@ export const getDocTypeLabel = (docType) => {
 };
 
 /**
- * Check if Cloudinary is realistically configured (not empty or dummy default values)
- */
-export const isCloudinaryConfigured = () => {
-  const { CLOUDINARY_URL, CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET } = process.env;
-
-  if (CLOUDINARY_URL && CLOUDINARY_URL.startsWith('cloudinary://') && !CLOUDINARY_URL.includes('your_')) {
-    return true;
-  }
-
-  if (
-    CLOUDINARY_CLOUD_NAME &&
-    CLOUDINARY_API_KEY &&
-    CLOUDINARY_API_SECRET &&
-    CLOUDINARY_CLOUD_NAME !== 'your_cloud_name' &&
-    CLOUDINARY_API_KEY !== 'your_api_key' &&
-    CLOUDINARY_API_SECRET !== 'your_api_secret'
-  ) {
-    return true;
-  }
-
-  return false;
-};
-
-/**
- * Upload a document (PDF, DOC, DOCX) buffer to Cloudinary with fallback to local disk
+ * Upload a document (PDF, DOC, DOCX) buffer directly to Cloudinary
  * @param {Object} params
  * @param {Express.Multer.File} params.file - Multer file object with buffer
  * @param {string} params.docType - Canonical docType ('msds', 'draftCoa', 'coa')
@@ -85,155 +63,107 @@ export const saveDocumentFile = async ({ file, docType, identifier = 'product', 
     throw new Error('No file buffer provided for document upload.');
   }
 
+  if (!isCloudinaryConfigured()) {
+    throw new Error('Cloudinary is not configured. Please ensure CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET are set in .env.');
+  }
+
   const normalized = normalizeDocType(docType) || 'doc';
   const cleanOriginalName = (file.originalname || `${normalized}.pdf`).replace(/[^a-zA-Z0-9._-]/g, '_');
   const extension = path.extname(cleanOriginalName) || '.pdf';
-  const baseName = path.basename(cleanOriginalName, extension);
   const cleanIdentifier = String(identifier).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
 
-  // 1. Attempt Cloudinary upload if configured
-  if (isCloudinaryConfigured()) {
-    try {
-      const publicId = `glp_doc_${cleanIdentifier}_${normalized}_${Date.now()}`;
-      const uploadOptions = {
-        folder: 'glp_pharma/documents',
-        public_id: publicId,
-        resource_type: 'auto',
-      };
+  const publicId = `glp_doc_${cleanIdentifier}_${normalized}_${Date.now()}`;
+  const uploadOptions = {
+    folder: 'glp_pharma/documents',
+    public_id: publicId,
+    resource_type: 'auto',
+  };
 
-      if (file.mimetype === 'application/pdf' || extension.toLowerCase() === '.pdf') {
-        uploadOptions.format = 'pdf';
+  if (file.mimetype === 'application/pdf' || extension.toLowerCase() === '.pdf') {
+    uploadOptions.format = 'pdf';
+  }
+
+  const uploadResult = await new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      uploadOptions,
+      (error, result) => {
+        if (error) {
+          console.error(`[Cloudinary Document Upload Error (${normalized})]:`, error);
+          return reject(new Error(`Cloudinary document upload failed: ${error.message || error}`));
+        }
+        resolve(result);
       }
+    );
+    stream.end(file.buffer);
+  });
 
-      const uploadResult = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          uploadOptions,
-          (error, result) => {
-            if (error) return reject(error);
-            resolve(result);
-          }
-        );
-        stream.end(file.buffer);
-      });
-
-      console.log(`[Cloudinary] Successfully uploaded ${normalized.toUpperCase()} to: ${uploadResult.secure_url}`);
-
-      return {
-        url: uploadResult.secure_url,
-        fileName: file.originalname || cleanOriginalName,
-        fileType: file.mimetype || 'application/pdf',
-        fileSize: file.size,
-        public_id: uploadResult.public_id,
-        resourceType: uploadResult.resource_type || 'image',
-        uploadedAt: new Date(),
-      };
-    } catch (err) {
-      console.warn('⚠️ Cloudinary document upload failed, falling back to local storage:', err.message);
-    }
-  } else {
-    console.warn('⚠️ Cloudinary is not configured. Saving document to local storage fallback. Configure CLOUDINARY_* in .env to store on Cloudinary.');
-  }
-
-  // 2. Local disk storage fallback
-  const uploadDir = path.resolve(process.cwd(), 'public/uploads/documents');
-  if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
-  }
-
-  const localFileName = `${normalized}_${Date.now()}_${baseName}${extension}`;
-  const filePath = path.join(uploadDir, localFileName);
-
-  fs.writeFileSync(filePath, file.buffer);
-
-  // Generate URL path
-  const relativeUrl = `/public/uploads/documents/${localFileName}`;
+  console.log(`[Cloudinary] Successfully uploaded ${normalized.toUpperCase()} to: ${uploadResult.secure_url}`);
 
   return {
-    url: relativeUrl,
-    fileName: file.originalname || localFileName,
+    url: uploadResult.secure_url,
+    fileName: file.originalname || cleanOriginalName,
     fileType: file.mimetype || 'application/pdf',
     fileSize: file.size,
-    localPath: filePath,
-    resourceType: 'local',
+    public_id: uploadResult.public_id,
+    resourceType: uploadResult.resource_type || 'raw',
     uploadedAt: new Date(),
   };
 };
 
 /**
- * Upload an image buffer (chemical structure, product picture) to Cloudinary with fallback to local disk
+ * Upload an image buffer (chemical structure, product picture) directly to Cloudinary
+ * The image name is set strictly to the impurity name (no random prefixes or timestamp suffixes)
  * @param {Object} params
  * @param {Express.Multer.File} params.file - Multer file object with buffer
- * @param {string} [params.identifier] - Product slug or ID for naming
+ * @param {string} [params.identifier] - Impurity name or slug
+ * @param {string} [params.name] - Impurity name
  * @param {Express.Request} [params.req] - Express request for constructing URLs
  * @returns {Promise<Object>} Image metadata object
  */
-export const saveImageFile = async ({ file, identifier = 'product', req = null }) => {
+export const saveImageFile = async ({ file, identifier = 'product', name = '', req = null }) => {
   if (!file || !file.buffer) {
     throw new Error('No image file buffer provided for upload.');
   }
 
-  const cleanOriginalName = (file.originalname || 'structure.png').replace(/[^a-zA-Z0-9._-]/g, '_');
-  const extension = path.extname(cleanOriginalName) || '.png';
-  const baseName = path.basename(cleanOriginalName, extension);
-  const cleanIdentifier = String(identifier).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
-
-  // 1. Attempt Cloudinary upload if configured
-  if (isCloudinaryConfigured()) {
-    try {
-      const publicId = `glp_img_${cleanIdentifier}_${Date.now()}`;
-      const uploadResult = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          {
-            folder: 'glp_pharma/products',
-            public_id: publicId,
-            resource_type: 'image',
-          },
-          (error, result) => {
-            if (error) return reject(error);
-            resolve(result);
-          }
-        );
-        stream.end(file.buffer);
-      });
-
-      console.log(`[Cloudinary] Successfully uploaded image to: ${uploadResult.secure_url}`);
-
-      return {
-        url: uploadResult.secure_url,
-        fileName: file.originalname || cleanOriginalName,
-        fileType: file.mimetype || 'image/png',
-        fileSize: file.size,
-        public_id: uploadResult.public_id,
-        resourceType: 'image',
-        uploadedAt: new Date(),
-      };
-    } catch (err) {
-      console.warn('⚠️ Cloudinary image upload failed, falling back to local storage:', err.message);
-    }
-  } else {
-    console.warn('⚠️ Cloudinary is not configured. Saving image to local storage fallback. Configure CLOUDINARY_* in .env to store on Cloudinary.');
+  if (!isCloudinaryConfigured()) {
+    throw new Error('Cloudinary is not configured. Please ensure CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET are set in .env.');
   }
 
-  // 2. Local disk storage fallback
-  const uploadDir = path.resolve(process.cwd(), 'public/uploads/images');
-  if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
-  }
+  // Use the exact impurity name as the image name on Cloudinary
+  const rawName = String(name || identifier || file.originalname || 'impurity').trim();
+  const nameWithoutExt = rawName.replace(/\.(png|jpe?g|webp|svg|gif)$/i, '').trim();
+  // Strip characters that break Cloudinary URLs or create unwanted directory nesting (/ and \)
+  const cleanImageName = nameWithoutExt.replace(/[/\\?%*:|"<>]/g, '_').trim() || 'impurity';
 
-  const localFileName = `img_${Date.now()}_${baseName}${extension}`;
-  const filePath = path.join(uploadDir, localFileName);
+  const uploadResult = await new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: 'GLP Pharma/subproducts-images',
+        public_id: cleanImageName,
+        overwrite: true,
+        invalidate: true,
+        resource_type: 'image',
+      },
+      (error, result) => {
+        if (error) {
+          console.error('[Cloudinary Upload Error]:', error);
+          return reject(new Error(`Cloudinary upload failed: ${error.message || error}`));
+        }
+        resolve(result);
+      }
+    );
+    stream.end(file.buffer);
+  });
 
-  fs.writeFileSync(filePath, file.buffer);
-
-  const relativeUrl = `/public/uploads/images/${localFileName}`;
+  console.log(`[Cloudinary] Successfully uploaded image "${cleanImageName}" to: ${uploadResult.secure_url}`);
 
   return {
-    url: relativeUrl,
-    fileName: file.originalname || localFileName,
+    url: uploadResult.secure_url,
+    fileName: file.originalname || cleanImageName,
     fileType: file.mimetype || 'image/png',
     fileSize: file.size,
-    localPath: filePath,
-    resourceType: 'local',
+    public_id: uploadResult.public_id,
+    resourceType: 'image',
     uploadedAt: new Date(),
   };
 };
@@ -244,18 +174,28 @@ export const saveImageFile = async ({ file, identifier = 'product', req = null }
 export const extractCloudinaryPublicId = (url) => {
   if (!url || typeof url !== 'string' || !url.includes('cloudinary.com')) return null;
   try {
-    // URL pattern: .../upload/(v12345/)?(folder/subfolder/public_id)(.ext)?
+    // URL pattern: .../upload/(transformations/)?(v12345/)?(public_id)(.ext)?
     const parts = url.split('/upload/');
     if (parts.length < 2) return null;
     let pathPart = parts[1];
-    // Remove version segment v12345/ if present
-    pathPart = pathPart.replace(/^v\d+\//, '');
-    // Remove extension
+
+    // If there is a version segment (e.g. /v12345/ or v12345/), remove everything up to and including it
+    if (/(?:^|\/)v\d+\//.test(pathPart)) {
+      pathPart = pathPart.replace(/^.*?(?:^|\/)v\d+\//, '');
+    } else {
+      // If there are transformations before known folders:
+      const folderMatch = pathPart.match(/(GLP(?:%20|\s)Pharma\/.*|glp_pharma\/.*)/i);
+      if (folderMatch) {
+        pathPart = folderMatch[1];
+      }
+    }
+
+    // Remove file extension
     const extIndex = pathPart.lastIndexOf('.');
     if (extIndex > -1) {
       pathPart = pathPart.substring(0, extIndex);
     }
-    return pathPart || null;
+    return decodeURIComponent(pathPart).trim() || null;
   } catch (e) {
     return null;
   }
@@ -315,9 +255,10 @@ export const deleteDocumentFile = async (document) => {
 /**
  * Delete an image file from Cloudinary or local disk
  * @param {string|Object} imageOrPublicId - URL, public_id or image object
+ * @param {string} [fallbackName] - Impurity name for fallback public_id construction
  */
-export const deleteImageFile = async (imageOrPublicId) => {
-  if (!imageOrPublicId) return;
+export const deleteImageFile = async (imageOrPublicId, fallbackName = '') => {
+  if (!imageOrPublicId && !fallbackName) return;
 
   let publicId = null;
   let url = null;
@@ -331,14 +272,36 @@ export const deleteImageFile = async (imageOrPublicId) => {
     } else {
       publicId = imageOrPublicId;
     }
-  } else if (typeof imageOrPublicId === 'object') {
+  } else if (typeof imageOrPublicId === 'object' && imageOrPublicId !== null) {
     publicId = imageOrPublicId.public_id || extractCloudinaryPublicId(imageOrPublicId.url);
     url = imageOrPublicId.url;
   }
 
+  // If publicId was not extracted from URL/object, but a fallback impurity name was provided
+  if (!publicId && fallbackName) {
+    const rawName = String(fallbackName).replace(/\.(png|jpe?g|webp|svg|gif)$/i, '').trim();
+    const cleanImageName = rawName.replace(/[/\\?%*:|"<>]/g, '_').trim();
+    if (cleanImageName) {
+      publicId = `GLP Pharma/subproducts-images/${cleanImageName}`;
+    }
+  }
+
   if (publicId && isCloudinaryConfigured()) {
     try {
-      await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+      console.log(`[Cloudinary] Deleting image from Cloudinary: "${publicId}"`);
+      const result = await cloudinary.uploader.destroy(publicId, { resource_type: 'image', invalidate: true });
+      console.log(`[Cloudinary] Deletion result for "${publicId}":`, result);
+
+      // If not found and a fallbackName exists, attempt deletion with direct impurity name in standard folder
+      if (result?.result === 'not found' && fallbackName) {
+        const rawName = String(fallbackName).replace(/\.(png|jpe?g|webp|svg|gif)$/i, '').trim();
+        const altPublicId = `GLP Pharma/subproducts-images/${rawName.replace(/[/\\?%*:|"<>]/g, '_').trim()}`;
+        if (altPublicId !== publicId) {
+          console.log(`[Cloudinary] Attempting fallback deletion with: "${altPublicId}"`);
+          const altResult = await cloudinary.uploader.destroy(altPublicId, { resource_type: 'image', invalidate: true });
+          console.log(`[Cloudinary] Fallback deletion result:`, altResult);
+        }
+      }
     } catch (err) {
       console.warn('Failed to delete image from Cloudinary:', err.message);
     }

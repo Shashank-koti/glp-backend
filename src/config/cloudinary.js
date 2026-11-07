@@ -1,6 +1,13 @@
 import { v2 as cloudinary } from 'cloudinary';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Ensure backend/.env is loaded from the backend directory regardless of cwd
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config();
 
 const cloudinaryUrl = process.env.CLOUDINARY_URL;
@@ -28,5 +35,20 @@ if (cloudinaryUrl && cloudinaryUrl.startsWith('cloudinary://') && !cloudinaryUrl
     secure: true,
   });
 }
+
+/**
+ * Returns true if Cloudinary is configured with valid credentials
+ */
+export const isCloudinaryConfigured = () => {
+  const conf = cloudinary.config();
+  return Boolean(
+    conf.cloud_name &&
+    conf.api_key &&
+    conf.api_secret &&
+    conf.cloud_name !== 'your_cloud_name' &&
+    conf.api_key !== 'your_api_key' &&
+    conf.api_secret !== 'your_api_secret'
+  );
+};
 
 export default cloudinary;

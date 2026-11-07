@@ -35,7 +35,7 @@ async function seedAdmin() {
             permissions: ['all'],
             isActive: true,
         });
-        await Admin.save();
+        await newAdmin.save();
         console.log('Admin account created successfully!');
 
     } catch (error) {

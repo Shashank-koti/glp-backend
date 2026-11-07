@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import slugGenerator from '../utils/slugGenerator.js';
+import { deleteImageFile, deleteDocumentFile } from '../utils/documentService.js';
 
 // Schema for Pricing Tiers
 const pricingTierSchema = new mongoose.Schema({
@@ -130,6 +131,24 @@ subProductSchema.index({
   'specifications.casNumber': 'text', 
 });
 subProductSchema.index({ mainProduct: 1, productType: 1 });
+
+// Automatic cleanup hook: When an impurity is deleted, also delete its Cloudinary image and documents
+subProductSchema.post('findOneAndDelete', async function (doc) {
+  if (doc) {
+    try {
+      if (doc.imagePublicId || (doc.image && doc.image.includes('cloudinary.com'))) {
+        await deleteImageFile(doc.imagePublicId || doc.image, doc.name);
+      }
+      if (doc.documents) {
+        if (doc.documents.msds) await deleteDocumentFile(doc.documents.msds);
+        if (doc.documents.draftCoa) await deleteDocumentFile(doc.documents.draftCoa);
+        if (doc.documents.coa) await deleteDocumentFile(doc.documents.coa);
+      }
+    } catch (err) {
+      console.warn('[SubProduct Hook] Error cleaning up files on delete:', err?.message || err);
+    }
+  }
+});
 
 const SubProduct = mongoose.model('SubProduct', subProductSchema);
 

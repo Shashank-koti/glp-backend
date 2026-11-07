@@ -13,6 +13,7 @@ import {
   saveImageFile,
   deleteDocumentFile,
   deleteImageFile,
+  extractCloudinaryPublicId,
   isCloudinaryConfigured,
   normalizeDocumentPayload,
   formatDocumentsForResponse,
@@ -484,6 +485,9 @@ export const crmDeleteMainProduct = async (req, res, next) => {
     // Cascade delete any SubProducts that point to this Main Product
     const relatedSubs = await SubProduct.find({ mainProduct: product._id });
     for (const sub of relatedSubs) {
+      if (sub.imagePublicId || (sub.image && sub.image.includes('cloudinary.com'))) {
+        await deleteImageFile(sub.imagePublicId || sub.image, sub.name);
+      }
       if (sub.documents) {
         if (sub.documents.msds) await deleteDocumentFile(sub.documents.msds);
         if (sub.documents.draftCoa) await deleteDocumentFile(sub.documents.draftCoa);
@@ -740,17 +744,6 @@ export const crmCreateSubProduct = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Commercial availability is required.' });
     }
 
-    // Chemical structure image check
-    const hasImagePayload = Boolean(
-      (image && typeof image === 'string' && image.trim()) ||
-      (req.files?.image && req.files.image[0]) ||
-      (req.files?.file && req.files.file[0]) ||
-      req.file
-    );
-    if (!hasImagePayload) {
-      return res.status(400).json({ success: false, message: 'Chemical structure image is required.' });
-    }
-
     // 2. Technical & Chemical Specifications validation
     let specs = specifications;
     if (typeof specs === 'string') {
@@ -828,13 +821,17 @@ export const crmCreateSubProduct = async (req, res, next) => {
     let finalImagePublicId = null;
 
     if (req.files?.image && req.files.image[0]) {
+      const impurityName = name?.trim() || finalSlug;
       const savedImg = await saveImageFile({
         file: req.files.image[0],
-        identifier: finalSlug,
+        identifier: impurityName,
+        name: impurityName,
         req,
       });
       finalImageUrl = savedImg.url;
       finalImagePublicId = savedImg.public_id;
+    } else if (finalImageUrl) {
+      finalImagePublicId = req.body.imagePublicId || extractCloudinaryPublicId(finalImageUrl);
     }
 
     const subProduct = await SubProduct.create({
@@ -963,40 +960,32 @@ export const crmUpdateSubProduct = async (req, res, next) => {
     }
 
     if (req.files?.image && req.files.image[0]) {
+      const impurityName = (req.body.name && req.body.name.trim()) || subProduct.name || subProduct.slug;
       const savedImg = await saveImageFile({
         file: req.files.image[0],
-        identifier: subProduct.slug || subProduct._id,
+        identifier: impurityName,
+        name: impurityName,
         req,
       });
       if (subProduct.imagePublicId || (subProduct.image && subProduct.image.includes('cloudinary.com'))) {
-        await deleteImageFile(subProduct.imagePublicId || subProduct.image);
+        await deleteImageFile(subProduct.imagePublicId || subProduct.image, subProduct.name);
       }
       subProduct.image = savedImg.url;
       subProduct.imagePublicId = savedImg.public_id;
     } else if (req.body?.removeImage === true || req.body?.removeImage === 'true') {
-      const hasReplacementImage = Boolean(
-        (req.files?.image && req.files.image[0]) ||
-        (req.body.image && typeof req.body.image === 'string' && req.body.image.trim())
-      );
-      if (!hasReplacementImage) {
-        return res.status(400).json({
-          success: false,
-          message: 'Chemical structure image is compulsory and cannot be removed without a replacement.',
-        });
-      }
       if (subProduct.imagePublicId || (subProduct.image && subProduct.image.includes('cloudinary.com'))) {
-        await deleteImageFile(subProduct.imagePublicId || subProduct.image);
+        await deleteImageFile(subProduct.imagePublicId || subProduct.image, subProduct.name);
       }
       subProduct.image = '';
       subProduct.imagePublicId = '';
     } else if (req.body.image !== undefined) {
-      if (!req.body.image || !req.body.image.trim()) {
-        return res.status(400).json({
-          success: false,
-          message: 'Chemical structure image cannot be set to empty.',
-        });
+      const newImg = req.body.image ? req.body.image.trim() : '';
+      if (subProduct.image && subProduct.image !== newImg) {
+        // Image was changed or cleared: delete old image from Cloudinary
+        await deleteImageFile(subProduct.imagePublicId || subProduct.image, subProduct.name);
       }
-      subProduct.image = req.body.image.trim();
+      subProduct.image = newImg;
+      subProduct.imagePublicId = newImg ? (req.body.imagePublicId || extractCloudinaryPublicId(newImg)) : '';
     }
     if (req.body.description !== undefined) subProduct.description = req.body.description;
     if (req.body.productType !== undefined) subProduct.productType = req.body.productType;
@@ -1133,7 +1122,7 @@ export const crmDeleteSubProduct = async (req, res, next) => {
 
     // Clean up document & image files attached to this subproduct from Cloudinary/disk
     if (subProduct.imagePublicId || (subProduct.image && subProduct.image.includes('cloudinary.com'))) {
-      await deleteImageFile(subProduct.imagePublicId || subProduct.image);
+      await deleteImageFile(subProduct.imagePublicId || subProduct.image, subProduct.name);
     }
     if (subProduct.documents) {
       if (subProduct.documents.msds) await deleteDocumentFile(subProduct.documents.msds);
@@ -1317,9 +1306,11 @@ export const crmUploadImageDirect = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'No image file was uploaded.' });
     }
 
+    const impurityName = req.body.name || req.body.identifier || req.file.originalname || 'impurity';
     const savedImage = await saveImageFile({
       file: req.file,
-      identifier: req.body.identifier || 'image',
+      identifier: impurityName,
+      name: impurityName,
       req,
     });
 
@@ -1345,9 +1336,11 @@ export const crmUploadDocumentDirect = async (req, res, next) => {
       /\.(png|jpe?g|webp|svg|gif)$/i.test(req.file.originalname);
 
     if (isImage) {
+      const impurityName = req.body.name || req.body.identifier || req.file.originalname || 'impurity';
       const savedImage = await saveImageFile({
         file: req.file,
-        identifier: req.body.identifier || 'image',
+        identifier: impurityName,
+        name: impurityName,
         req,
       });
       return ResponseFormatter.success(res, savedImage, 'Image uploaded successfully to Cloudinary.', 201);

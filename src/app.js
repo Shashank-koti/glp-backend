@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import path from 'path';
 import helmet from 'helmet';
 import cors from 'cors';
@@ -97,6 +98,17 @@ app.use('/api/crm/main-products', crmMainProductRoutes);
 app.use('/api/crm/categories', crmCategoryRoutes);
 app.use('/api/crm/inquiries', crmInquiryRoutes);
 app.use('/api/crm/clients', crmClientRoutes);
+
+// Health Check Route
+app.get('/api/health', (req, res) => {
+  const dbState = mongoose.connection.readyState;
+  const states = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
+  res.status(dbState === 1 ? 200 : 503).json({
+    status: dbState === 1 ? 'ok' : 'degraded',
+    database: states[dbState] || 'unknown',
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // Base Route
 app.get('/', (req, res) => {
