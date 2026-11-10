@@ -477,6 +477,8 @@ export const getProductSubProducts = async (req, res, next) => {
               _id: categoryDoc._id,
               categoryName: categoryDoc.categoryName,
               slug: categoryDoc.slug,
+              subtitle: categoryDoc.subtitle,
+              description: categoryDoc.description,
             },
           },
           `SubProducts for category '${categoryDoc.categoryName}' fetched successfully`
