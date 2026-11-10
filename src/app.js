@@ -17,6 +17,7 @@ import inquiryRoutes from './routes/inquiryRoutes.js';
 import pricingRoutes from './routes/pricingRoutes.js';
 import contactRoutes from './routes/contactRoutes.js';
 import locationRoutes from './routes/locationRoutes.js';
+import clientLogoRoutes from './routes/clientLogoRoutes.js';
 
 import crmAuthRoutes from './routes/crmAuthRoutes.js';
 import crmProductRoutes from './routes/crmProductRoutes.js';
@@ -90,6 +91,7 @@ app.use('/api/inquiries', inquiryRoutes);
 app.use('/api/pricing', pricingRoutes);
 app.use('/api/location', locationRoutes);
 app.use('/api/contact', contactRoutes);
+app.use('/api/client-logos', clientLogoRoutes);
 
 // CRM Routes
 app.use('/api/crm/auth', crmAuthRoutes);
