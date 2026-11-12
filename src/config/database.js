@@ -26,81 +26,96 @@ if (!cached) {
   cached = global.mongoose = { conn: null, promise: null };
 }
 
-// Connection lifecycle listeners to prevent unhandled EventEmitter errors
+// Connection lifecycle listeners (no auto-reconnect)
 mongoose.connection.on('connected', () => {
-  console.log(`[MongoDB] Connected successfully: ${mongoose.connection.host}`);
+  console.log(`[MongoDB] Connected successfully to host: ${mongoose.connection.host}`);
 });
-
-mongoose.connection.on('error', (err) => {
-  console.error(`[MongoDB] Connection error: ${err.message}`);
-});
-
-let reconnectTimer = null;
-const scheduleReconnect = (delay = 5000) => {
-  if (reconnectTimer || mongoose.connection.readyState === 1 || mongoose.connection.readyState === 2) {
-    return;
-  }
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = null;
-    if (mongoose.connection.readyState !== 1 && mongoose.connection.readyState !== 2) {
-      console.log('[MongoDB] Auto-reconnecting to database...');
-      try {
-        await connectDB(3, 3000);
-      } catch (err) {
-        console.warn(`[MongoDB] Auto-reconnect failed: ${err.message}. Will try again...`);
-      }
-    }
-  }, delay);
-};
 
 mongoose.connection.on('disconnected', () => {
-  console.warn('[MongoDB] Disconnected. Waiting for auto-reconnect...');
+  console.warn('[MongoDB] Disconnected from server.');
   cached.conn = null;
   cached.promise = null;
-  scheduleReconnect(5000);
 });
 
-mongoose.connection.on('reconnected', () => {
-  console.log('[MongoDB] Reconnected successfully.');
-});
-
-const connectDB = async (retries = 5, retryDelay = 4000) => {
+const connectDB = async () => {
   if (cached.conn && mongoose.connection.readyState === 1) {
     return cached.conn;
   }
 
   const mongoURI = process.env.MONGO_URI;
   if (!mongoURI) {
-    throw new Error('Please define the MONGO_URI environment variable inside backend/.env');
+    const err = new Error('Please define the MONGO_URI environment variable inside backend/.env');
+    console.error(`[MongoDB Error] ${err.message}`);
+    throw err;
+  }
+
+  // Parse URI to extract and safely display target details without exposing passwords
+  let targetHost = 'unknown';
+  let targetDb = 'unknown';
+  let authDb = '';
+  try {
+    const parsed = new URL(mongoURI);
+    targetHost = parsed.host;
+    targetDb = parsed.pathname.replace(/^\//, '') || 'unknown';
+    authDb = parsed.searchParams.get('authSource') || targetDb;
+  } catch (e) {
+    // Non-standard URI format
   }
 
   const opts = {
-    serverSelectionTimeoutMS: 10000,
+    serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    connectTimeoutMS: 10000,
     maxPoolSize: 25,
     family: 4, // Force IPv4 in MongoDB driver
   };
 
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      if (!cached.promise || mongoose.connection.readyState === 0) {
-        cached.promise = mongoose.connect(mongoURI, opts);
-      }
-      cached.conn = await cached.promise;
-      return cached.conn;
-    } catch (error) {
-      cached.promise = null;
-      cached.conn = null;
-      console.error(`[MongoDB] Connection attempt ${attempt}/${retries} failed: ${error.message}`);
-      if (attempt < retries) {
-        console.log(`[MongoDB] Retrying connection in ${retryDelay / 1000}s...`);
-        await new Promise((res) => setTimeout(res, retryDelay));
-      } else {
-        scheduleReconnect(retryDelay);
-        throw error;
-      }
+  try {
+    cached.promise = mongoose.connect(mongoURI, opts);
+    cached.conn = await cached.promise;
+    return cached.conn;
+  } catch (error) {
+    cached.promise = null;
+    cached.conn = null;
+
+    console.error('\n==================== [MongoDB Connection Error] ====================');
+    console.error(`Error Name    : ${error.name}`);
+    console.error(`Error Message : ${error.message}`);
+    console.error(`Target Host   : ${targetHost}`);
+    console.error(`Database      : ${targetDb}`);
+    if (authDb) {
+      console.error(`Auth Source   : ${authDb}`);
     }
+
+    if (error.message.includes('ECONNREFUSED')) {
+      console.error('\n[Root Cause - Connection Refused]:');
+      if (targetHost.includes('127.0.0.1') || targetHost.includes('localhost')) {
+        console.error('-> You are attempting to connect to 127.0.0.1 (localhost).');
+        console.error('   There is NO MongoDB server running locally on your computer.');
+        console.error('-> Because you are using a remote VPS MongoDB community server:');
+        console.error('   1. In backend/.env, change 127.0.0.1 to your VPS IP address.');
+        console.error('      Example: MONGO_URI=mongodb://glpApp:<pwd>@<VPS_IP>:27017/glp_pharma?authSource=glp_pharma');
+        console.error('   2. OR start an SSH tunnel from your computer to the VPS:');
+        console.error('      ssh -N -L 27017:127.0.0.1:27017 root@<VPS_IP>');
+      } else {
+        console.error(`-> The VPS at ${targetHost} actively refused connection on port 27017.`);
+        console.error('   Check if MongoDB is running on VPS: sudo systemctl status mongod');
+      }
+    } else if (error.message.includes('timed out') || error.name === 'MongooseServerSelectionError') {
+      console.error('\n[Root Cause - Connection Timed Out / Unreachable]:');
+      console.error(`-> Could not reach ${targetHost} on port 27017 within 5 seconds.`);
+      console.error('-> On your VPS, check:');
+      console.error('   1. In /etc/mongod.conf, ensure bindIp is set to 0.0.0.0 (not 127.0.0.1).');
+      console.error('   2. Allow port 27017 in VPS firewall: sudo ufw allow 27017/tcp');
+      console.error('   3. If using AWS/DigitalOcean/Hetzner, allow port 27017 in cloud firewall.');
+    } else if (error.message.includes('Authentication') || error.message.includes('auth')) {
+      console.error('\n[Root Cause - Authentication Failed]:');
+      console.error('-> MongoDB rejected your username or password.');
+      console.error('-> Check your password and authSource database:');
+      console.error('   If user was created in admin db, set authSource=admin');
+    }
+    console.error('====================================================================\n');
+
+    throw error;
   }
 };
 
