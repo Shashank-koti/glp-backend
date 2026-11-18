@@ -54,8 +54,14 @@ class ApiFeatures {
   }
 
   paginate() {
+    const rawLimit = this.queryString.limit;
+    // Allow fetching all records without pagination when limit is 'all', '0', 0, or '-1'
+    if (rawLimit === 'all' || rawLimit === '0' || rawLimit === 0 || rawLimit === '-1' || rawLimit === -1) {
+      return this;
+    }
+
     const page = parseInt(this.queryString.page, 10) || 1;
-    const limit = parseInt(this.queryString.limit, 10) || 10;
+    const limit = parseInt(rawLimit, 10) || 10;
     const skip = (page - 1) * limit;
 
     this.query = this.query.skip(skip).limit(limit);

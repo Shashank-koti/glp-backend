@@ -608,15 +608,19 @@ export const crmGetProducts = async (req, res, next) => {
       return formatted;
     });
 
+    const isUnlimited = req.query.limit === 'all' || req.query.limit === '0' || req.query.limit === 0 || req.query.limit === '-1';
+    const limitNum = isUnlimited ? total : (parseInt(req.query.limit, 10) || 10);
+    const pages = isUnlimited ? 1 : (Math.ceil(total / limitNum) || 1);
+
     return ResponseFormatter.successWithPagination(
       res,
       formattedProducts,
       {
         total,
-        pages: Math.ceil(total / (parseInt(req.query.limit, 10) || 10)) || 1,
+        pages,
         count: formattedProducts.length,
         page: parseInt(req.query.page, 10) || 1,
-        limit: parseInt(req.query.limit, 10) || 10,
+        limit: limitNum,
         category: resolvedCategory
           ? {
             _id: resolvedCategory._id,
