@@ -1284,13 +1284,11 @@ export const crmGetCloudinaryStatus = async (req, res, next) => {
         configured,
         cloudName: process.env.CLOUDINARY_CLOUD_NAME || (process.env.CLOUDINARY_URL ? 'Connected via CLOUDINARY_URL' : null),
         folders: {
-          images: 'glp_pharma/products',
-          documents: 'glp_pharma/documents',
+          images: 'GLP Pharma/subproducts-images (Cloudinary)',
+          documents: 'documents/{coa,msds,draft-coa} (VPS Server)',
         },
       },
-      configured
-        ? 'Cloudinary is configured and active for images and documents.'
-        : 'Cloudinary is not configured. Falling back to local storage.'
+      'Storage status: Images on Cloudinary, Compliance documents stored locally on VPS server.'
     );
   } catch (error) {
     next(error);

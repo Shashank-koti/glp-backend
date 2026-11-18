@@ -97,14 +97,20 @@ export const getProducts = async (req, res, next) => {
           categoryId: cat.categoryId || cat._id?.toString()
         };
       }
+      const hostBase = `${req.protocol}://${req.get('host')}`;
+      const toFull = (url) => (url && url.startsWith('/') && hostBase ? `${hostBase}${url}` : url);
+
       formatted.documents = sp.documents || { msds: null, draftCoa: null, coa: null };
-      formatted.documentSummary = formatDocumentsForResponse(sp.documents, sp.slug, req);
+      formatted.documentSummary = formatDocumentsForResponse(sp.documents, sp.slug || sp.p_link, req);
       formatted.hasMsds = Boolean(sp.documents?.msds?.url);
       formatted.hasDraftCoa = Boolean(sp.documents?.draftCoa?.url);
       formatted.hasCoa = Boolean(sp.documents?.coa?.url);
-      formatted.msdsUrl = sp.documents?.msds?.url || null;
-      formatted.draftCoaUrl = sp.documents?.draftCoa?.url || null;
-      formatted.coaUrl = sp.documents?.coa?.url || null;
+      formatted.msdsUrl = toFull(sp.documents?.msds?.url) || null;
+      formatted.draftCoaUrl = toFull(sp.documents?.draftCoa?.url) || null;
+      formatted.coaUrl = toFull(sp.documents?.coa?.url) || null;
+      formatted.msdsPath = sp.documents?.msds?.url || null;
+      formatted.draftCoaPath = sp.documents?.draftCoa?.url || null;
+      formatted.coaPath = sp.documents?.coa?.url || null;
       return formatted;
     });
 
@@ -209,14 +215,20 @@ export const getProductBySlug = async (req, res, next) => {
     }
 
     // Attach documents and helper properties
+    const hostBase = `${req.protocol}://${req.get('host')}`;
+    const toFull = (url) => (url && url.startsWith('/') && hostBase ? `${hostBase}${url}` : url);
+
     formattedSubProduct.documents = subProduct.documents || { msds: null, draftCoa: null, coa: null };
-    formattedSubProduct.documentSummary = formatDocumentsForResponse(subProduct.documents, subProduct.slug, req);
+    formattedSubProduct.documentSummary = formatDocumentsForResponse(subProduct.documents, subProduct.slug || subProduct.p_link, req);
     formattedSubProduct.hasMsds = Boolean(subProduct.documents?.msds?.url);
     formattedSubProduct.hasDraftCoa = Boolean(subProduct.documents?.draftCoa?.url);
     formattedSubProduct.hasCoa = Boolean(subProduct.documents?.coa?.url);
-    formattedSubProduct.msdsUrl = subProduct.documents?.msds?.url || null;
-    formattedSubProduct.draftCoaUrl = subProduct.documents?.draftCoa?.url || null;
-    formattedSubProduct.coaUrl = subProduct.documents?.coa?.url || null;
+    formattedSubProduct.msdsUrl = toFull(subProduct.documents?.msds?.url) || null;
+    formattedSubProduct.draftCoaUrl = toFull(subProduct.documents?.draftCoa?.url) || null;
+    formattedSubProduct.coaUrl = toFull(subProduct.documents?.coa?.url) || null;
+    formattedSubProduct.msdsPath = subProduct.documents?.msds?.url || null;
+    formattedSubProduct.draftCoaPath = subProduct.documents?.draftCoa?.url || null;
+    formattedSubProduct.coaPath = subProduct.documents?.coa?.url || null;
 
     return ResponseFormatter.success(res, formattedSubProduct, 'Product fetched successfully');
   } catch (error) {
@@ -622,6 +634,39 @@ export const testProduct = async (req, res, next) => {
 // DOCUMENT DOWNLOAD & RETRIEVAL CONTROLLERS (CLIENT/WEBSITE)
 // ============================================================================
 
+/**
+ * Helper to construct robust product lookup condition
+ * Matches slug, p_link, catalogueNumber, casNumber (exact or regex), alternateCas, or ObjectId
+ */
+const buildProductLookupConditions = (rawIdentifier) => {
+  const rawParam = (rawIdentifier || '').trim();
+  const casMatch = rawParam.match(/\d{2,7}-\d{2}-\d/);
+  const cleanCas = casMatch ? casMatch[0] : rawParam.split('(')[0].trim();
+  const escapeRegex = (str) => str.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+  const escapedClean = escapeRegex(cleanCas);
+
+  const orConditions = [
+    { slug: rawParam },
+    { slug: cleanCas },
+    { p_link: rawParam },
+    { 'specifications.catalogueNumber': rawParam },
+    { 'specifications.casNumber': rawParam },
+    { 'specifications.casNumber': cleanCas },
+    { 'specifications.alternateCas': rawParam },
+    { 'specifications.alternateCas': cleanCas },
+    ...(mongoose.isValidObjectId(rawParam) ? [{ _id: rawParam }] : []),
+  ];
+
+  if (escapedClean) {
+    orConditions.push(
+      { 'specifications.casNumber': { $regex: `^${escapedClean}(\\s*\\(.*\\)|;.*)?$`, $options: 'i' } },
+      { 'specifications.alternateCas': { $regex: `^${escapedClean}(\\s*\\(.*\\)|;.*)?$`, $options: 'i' } }
+    );
+  }
+
+  return orConditions;
+};
+
 // @desc    Download a product document (MSDS, Draft COA, COA)
 // @route   GET /api/products/:slug/download/:docType
 // @route   GET /api/products/:slug/documents/:docType/download
@@ -638,14 +683,9 @@ export const downloadProductDocument = async (req, res, next) => {
       });
     }
 
-    // Look up SubProduct (by slug, CAS number, or ObjectId) - only subproducts contain documents
+    // Look up SubProduct (by slug, CAS number, catalogue number, p_link, or ObjectId)
     const product = await SubProduct.findOne({
-      $or: [
-        { slug: slug },
-        { 'specifications.casNumber': slug },
-        ...(mongoose.isValidObjectId(slug) ? [{ _id: slug }] : []),
-      ],
-      isActive: true,
+      $or: buildProductLookupConditions(slug),
     });
 
     if (!product) {
@@ -666,6 +706,9 @@ export const downloadProductDocument = async (req, res, next) => {
       });
     }
 
+    const hostBase = `${req.protocol}://${req.get('host')}`;
+    const toFull = (url) => (url && url.startsWith('/') && hostBase ? `${hostBase}${url}` : url);
+
     // If client requested JSON metadata
     if (
       req.query.format === 'json' ||
@@ -679,7 +722,9 @@ export const downloadProductDocument = async (req, res, next) => {
           docType: normalizedType,
           docLabel,
           fileName: doc.fileName || `${product.slug || slug}-${normalizedType}.pdf`,
-          url: doc.url,
+          url: toFull(doc.url),
+          path: doc.url,
+          storageType: doc.storageType || (doc.url.includes('cloudinary.com') ? 'cloudinary' : 'local'),
           fileType: doc.fileType || 'application/pdf',
           fileSize: doc.fileSize,
           uploadedAt: doc.uploadedAt,
@@ -695,19 +740,41 @@ export const downloadProductDocument = async (req, res, next) => {
     // Direct browser file download
     const cleanFileName = doc.fileName || `${product.slug || slug}-${normalizedType}.pdf`;
 
-    // Local file stream
-    if (doc.url.startsWith('/public/uploads/')) {
+    // 1. VPS Server document storage (documents/coa, documents/msds, documents/draft-coa)
+    if (doc.url && (doc.url.startsWith('/documents/') || doc.url.startsWith('/api/documents/'))) {
+      const cleanRelative = doc.url.replace(/^\/?(api\/)?documents\//, '');
+      const documentsBase = fs.existsSync(path.join(process.cwd(), 'backend', 'documents'))
+        ? path.resolve(process.cwd(), 'backend', 'documents')
+        : path.resolve(process.cwd(), 'documents');
+      const localPath = path.resolve(documentsBase, cleanRelative);
+      if (fs.existsSync(localPath)) {
+        return res.download(localPath, cleanFileName);
+      }
+    }
+
+    // 2. Direct localPath on product document
+    if (doc.localPath && fs.existsSync(doc.localPath)) {
+      return res.download(doc.localPath, cleanFileName);
+    }
+
+    // 3. Legacy public uploads
+    if (doc.url && doc.url.startsWith('/public/uploads/')) {
       const relative = doc.url.replace(/^\/?public\//, '');
       const localPath = path.resolve(process.cwd(), 'public', relative);
       if (fs.existsSync(localPath)) {
         return res.download(localPath, cleanFileName);
       }
-    } else if (doc.localPath && fs.existsSync(doc.localPath)) {
-      return res.download(doc.localPath, cleanFileName);
     }
 
-    // Remote file (Cloudinary, CDN, external) -> redirect to download/view
-    return res.redirect(doc.url);
+    // 4. Remote file (Cloudinary, CDN, external) -> redirect to download/view
+    if (doc.url && (doc.url.startsWith('http://') || doc.url.startsWith('https://'))) {
+      return res.redirect(doc.url);
+    }
+
+    return res.status(404).json({
+      success: false,
+      message: `${docLabel} file is registered in database but could not be located on server storage (${doc.url}).`,
+    });
   } catch (error) {
     next(error);
   }
@@ -722,12 +789,7 @@ export const getProductDocuments = async (req, res, next) => {
 
     // Only subproducts contain documents
     const product = await SubProduct.findOne({
-      $or: [
-        { slug: slug },
-        { 'specifications.casNumber': slug },
-        ...(mongoose.isValidObjectId(slug) ? [{ _id: slug }] : []),
-      ],
-      isActive: true,
+      $or: buildProductLookupConditions(slug),
     });
 
     if (!product) {
@@ -774,12 +836,7 @@ export const getProductDocumentByType = async (req, res, next) => {
 
     // Only subproducts contain documents
     const product = await SubProduct.findOne({
-      $or: [
-        { slug: slug },
-        { 'specifications.casNumber': slug },
-        ...(mongoose.isValidObjectId(slug) ? [{ _id: slug }] : []),
-      ],
-      isActive: true,
+      $or: buildProductLookupConditions(slug),
     });
 
     if (!product) {
@@ -790,6 +847,7 @@ export const getProductDocumentByType = async (req, res, next) => {
     const docLabel = getDocTypeLabel(normalizedType);
     const hasDoc = Boolean(doc && doc.url);
     const hostBase = `${req.protocol}://${req.get('host')}`;
+    const toFull = (url) => (url && url.startsWith('/') && hostBase ? `${hostBase}${url}` : url);
     const downloadUrl = hasDoc
       ? `${hostBase}/api/products/${product.slug || product.p_link}/download/${docType}`
       : null;
@@ -804,8 +862,10 @@ export const getProductDocumentByType = async (req, res, next) => {
         fileType: doc?.fileType || null,
         fileSize: doc?.fileSize || null,
         uploadedAt: doc?.uploadedAt || null,
+        storageType: doc?.storageType || (doc?.url?.includes('cloudinary.com') ? 'cloudinary' : 'local'),
+        path: doc?.url || null,
+        url: toFull(doc?.url) || null,
         downloadUrl,
-        url: doc?.url || null,
         product: {
           id: product._id,
           name: product.name || product.heading,

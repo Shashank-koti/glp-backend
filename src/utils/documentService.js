@@ -50,7 +50,45 @@ export const getDocTypeLabel = (docType) => {
 };
 
 /**
- * Upload a document (PDF, DOC, DOCX) buffer directly to Cloudinary
+ * Helper to get the canonical VPS server documents directory
+ * Works seamlessly whether Node is launched from repository root or backend folder
+ */
+export const getDocumentsDir = () => {
+  const cwd = process.cwd();
+  if (fs.existsSync(path.join(cwd, 'backend', 'documents'))) {
+    return path.resolve(cwd, 'backend', 'documents');
+  }
+  return path.resolve(cwd, 'documents');
+};
+
+/**
+ * Map canonical docType ('msds', 'draftCoa', 'coa') to directory name on VPS server
+ * Directory structure:
+ * documents/
+ * ├── coa/
+ * ├── msds/
+ * └── draft-coa/
+ *
+ * @param {string} docType
+ * @returns {'coa'|'msds'|'draft-coa'}
+ */
+export const getDocSubdirectory = (docType) => {
+  const normalized = normalizeDocType(docType);
+  if (normalized === 'coa') return 'coa';
+  if (normalized === 'draftCoa') return 'draft-coa';
+  return 'msds';
+};
+
+/**
+ * Upload and save a document (PDF, DOC, DOCX) directly to the VPS server filesystem.
+ * Documents are organized under:
+ * documents/
+ * ├── coa/
+ * ├── msds/
+ * └── draft-coa/
+ *
+ * Note: Chemical structure images continue to be stored on Cloudinary via saveImageFile.
+ *
  * @param {Object} params
  * @param {Express.Multer.File} params.file - Multer file object with buffer
  * @param {string} params.docType - Canonical docType ('msds', 'draftCoa', 'coa')
@@ -63,49 +101,41 @@ export const saveDocumentFile = async ({ file, docType, identifier = 'product', 
     throw new Error('No file buffer provided for document upload.');
   }
 
-  if (!isCloudinaryConfigured()) {
-    throw new Error('Cloudinary is not configured. Please ensure CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET are set in .env.');
+  const normalized = normalizeDocType(docType) || 'msds';
+  const subFolder = getDocSubdirectory(normalized); // 'coa' | 'msds' | 'draft-coa'
+
+  // Ensure target folder exists on server
+  const documentsBase = getDocumentsDir();
+  const targetDir = path.join(documentsBase, subFolder);
+  if (!fs.existsSync(targetDir)) {
+    fs.mkdirSync(targetDir, { recursive: true });
   }
 
-  const normalized = normalizeDocType(docType) || 'doc';
   const cleanOriginalName = (file.originalname || `${normalized}.pdf`).replace(/[^a-zA-Z0-9._-]/g, '_');
   const extension = path.extname(cleanOriginalName) || '.pdf';
   const cleanIdentifier = String(identifier).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
 
-  const publicId = `glp_doc_${cleanIdentifier}_${normalized}_${Date.now()}`;
-  const uploadOptions = {
-    folder: 'glp_pharma/documents',
-    public_id: publicId,
-    resource_type: 'auto',
-  };
+  // Unique file naming to prevent collisions on duplicate doc uploads:
+  // e.g., coa_trazodone_1731948291029_a3f9b.pdf
+  const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const serverFileName = `${subFolder.replace('-', '_')}_${cleanIdentifier}_${uniqueSuffix}${extension}`;
+  const targetFilePath = path.join(targetDir, serverFileName);
 
-  if (file.mimetype === 'application/pdf' || extension.toLowerCase() === '.pdf') {
-    uploadOptions.format = 'pdf';
-  }
+  // Write file to local server filesystem
+  fs.writeFileSync(targetFilePath, file.buffer);
+  console.log(`[VPS Server Storage] Saved ${normalized.toUpperCase()} to: ${targetFilePath}`);
 
-  const uploadResult = await new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      uploadOptions,
-      (error, result) => {
-        if (error) {
-          console.error(`[Cloudinary Document Upload Error (${normalized})]:`, error);
-          return reject(new Error(`Cloudinary document upload failed: ${error.message || error}`));
-        }
-        resolve(result);
-      }
-    );
-    stream.end(file.buffer);
-  });
-
-  console.log(`[Cloudinary] Successfully uploaded ${normalized.toUpperCase()} to: ${uploadResult.secure_url}`);
+  // Relative URL path served statically by Express
+  const relativeUrl = `/documents/${subFolder}/${serverFileName}`;
 
   return {
-    url: uploadResult.secure_url,
-    fileName: file.originalname || cleanOriginalName,
+    url: relativeUrl,
+    fileName: file.originalname || serverFileName,
     fileType: file.mimetype || 'application/pdf',
     fileSize: file.size,
-    public_id: uploadResult.public_id,
-    resourceType: uploadResult.resource_type || 'raw',
+    localPath: targetFilePath,
+    storageType: 'local',
+    resourceType: 'raw',
     uploadedAt: new Date(),
   };
 };
@@ -217,37 +247,61 @@ export const deleteDocumentFile = async (document) => {
     return;
   }
 
-  // Cloudinary deletion
-  const publicId = document.public_id || extractCloudinaryPublicId(document.url);
-  if (publicId && isCloudinaryConfigured()) {
-    try {
-      const resType = document.resourceType || document.resource_type || 'image';
-      const result = await cloudinary.uploader.destroy(publicId, { resource_type: resType });
-      if (result?.result === 'not found') {
-        // Fallback: try raw resource_type
-        await cloudinary.uploader.destroy(publicId, { resource_type: 'raw' });
-      }
-    } catch (err) {
-      console.warn('Failed to delete document from Cloudinary:', err.message);
-    }
-  }
-
-  // Local disk deletion
+  // 1. Local VPS server disk deletion via localPath
   if (document.localPath && fs.existsSync(document.localPath)) {
     try {
       fs.unlinkSync(document.localPath);
+      console.log(`[VPS Server Storage] Successfully deleted document at: ${document.localPath}`);
+      return;
     } catch (err) {
       console.warn('Failed to delete local document file:', err.message);
     }
-  } else if (document.url && typeof document.url === 'string' && document.url.startsWith('/public/uploads/')) {
+  }
+
+  // 2. Local VPS server disk deletion via relative /documents/ URL
+  if (
+    document.url &&
+    typeof document.url === 'string' &&
+    (document.url.startsWith('/documents/') || document.url.startsWith('/api/documents/'))
+  ) {
+    try {
+      const cleanPath = document.url.replace(/^\/?(api\/)?documents\//, '');
+      const local = path.resolve(getDocumentsDir(), cleanPath);
+      if (fs.existsSync(local)) {
+        fs.unlinkSync(local);
+        console.log(`[VPS Server Storage] Successfully deleted document via URL path: ${local}`);
+        return;
+      }
+    } catch (err) {
+      console.warn('Failed to delete local document via URL path:', err.message);
+    }
+  }
+
+  // 3. Legacy public uploads disk deletion
+  if (document.url && typeof document.url === 'string' && document.url.startsWith('/public/uploads/')) {
     try {
       const relative = document.url.replace(/^\/?public\//, '');
       const local = path.resolve(process.cwd(), 'public', relative);
       if (fs.existsSync(local)) {
         fs.unlinkSync(local);
+        return;
       }
     } catch (err) {
-      console.warn('Failed to delete local document via URL path:', err.message);
+      console.warn('Failed to delete legacy document via URL path:', err.message);
+    }
+  }
+
+  // 4. Legacy Cloudinary deletion (if previously stored in Cloudinary)
+  const publicId = document.public_id || extractCloudinaryPublicId(document.url);
+  if (publicId && isCloudinaryConfigured()) {
+    try {
+      const resType = document.resourceType || document.resource_type || 'raw';
+      const result = await cloudinary.uploader.destroy(publicId, { resource_type: resType });
+      if (result?.result === 'not found') {
+        await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+      }
+    } catch (err) {
+      console.warn('Failed to delete legacy document from Cloudinary:', err.message);
     }
   }
 };
@@ -332,20 +386,26 @@ export const normalizeDocumentPayload = (input, docType) => {
   if (typeof input === 'string') {
     const trimmed = input.trim();
     if (!trimmed) return null;
+    const isCloudinary = trimmed.includes('cloudinary.com');
     return {
       url: trimmed,
       fileName: path.basename(trimmed) || `${docType.toUpperCase()}.pdf`,
       fileType: 'application/pdf',
+      storageType: isCloudinary ? 'cloudinary' : 'local',
       uploadedAt: new Date(),
     };
   }
 
   if (typeof input === 'object' && input.url) {
+    const trimmedUrl = String(input.url).trim();
+    const isCloudinary = trimmedUrl.includes('cloudinary.com');
     return {
-      url: String(input.url).trim(),
-      fileName: input.fileName ? String(input.fileName).trim() : path.basename(input.url) || `${docType.toUpperCase()}.pdf`,
+      url: trimmedUrl,
+      fileName: input.fileName ? String(input.fileName).trim() : path.basename(trimmedUrl) || `${docType.toUpperCase()}.pdf`,
       fileType: input.fileType ? String(input.fileType).trim() : 'application/pdf',
       fileSize: typeof input.fileSize === 'number' ? input.fileSize : undefined,
+      localPath: input.localPath || undefined,
+      storageType: input.storageType || (isCloudinary ? 'cloudinary' : 'local'),
       public_id: input.public_id || undefined,
       uploadedAt: input.uploadedAt ? new Date(input.uploadedAt) : new Date(),
     };
@@ -355,7 +415,7 @@ export const normalizeDocumentPayload = (input, docType) => {
 };
 
 /**
- * Format documents for client response with status flags and download URLs
+ * Format documents for client response with status flags, paths and download URLs
  * @param {Object} documents
  * @param {string} productSlug
  * @param {Express.Request} [req]
@@ -369,7 +429,8 @@ export const formatDocumentsForResponse = (documents = {}, productSlug = '', req
     const fullDownloadUrl = downloadRoute ? `${hostBase}${downloadRoute}` : null;
 
     let fullFileUrl = item?.url || null;
-    if (fullFileUrl && fullFileUrl.startsWith('/public/') && hostBase) {
+    // Prefix relative paths with hostBase (supports /documents/ and /public/)
+    if (fullFileUrl && (fullFileUrl.startsWith('/documents/') || fullFileUrl.startsWith('/api/documents/') || fullFileUrl.startsWith('/public/')) && hostBase) {
       fullFileUrl = `${hostBase}${fullFileUrl}`;
     }
 
@@ -381,8 +442,10 @@ export const formatDocumentsForResponse = (documents = {}, productSlug = '', req
       fileType: item?.fileType || 'application/pdf',
       fileSize: item?.fileSize || null,
       uploadedAt: item?.uploadedAt || null,
-      url: fullFileUrl,
-      downloadUrl: fullDownloadUrl,
+      storageType: item?.storageType || (item?.url?.includes('cloudinary.com') ? 'cloudinary' : 'local'),
+      path: item?.url || null, // Direct server relative path e.g. /documents/coa/...
+      url: fullFileUrl, // Full absolute URL when req is provided, otherwise relative path
+      downloadUrl: fullDownloadUrl, // API download route
     };
   };
 

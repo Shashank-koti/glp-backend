@@ -1,6 +1,7 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import path from 'path';
+import fs from 'fs';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -91,6 +92,24 @@ if (process.env.NODE_ENV === 'development') {
 const publicDir = path.resolve(process.cwd(), 'public');
 app.use('/public', express.static(publicDir));
 app.use('/uploads', express.static(path.join(publicDir, 'uploads')));
+
+// VPS Server Document Storage (MSDS, Draft COA, COA)
+// Structure:
+// documents/
+// ├── coa/
+// ├── msds/
+// └── draft-coa/
+const documentsDir = fs.existsSync(path.join(process.cwd(), 'backend', 'documents'))
+  ? path.resolve(process.cwd(), 'backend', 'documents')
+  : path.resolve(process.cwd(), 'documents');
+['coa', 'msds', 'draft-coa'].forEach((sub) => {
+  const subDir = path.join(documentsDir, sub);
+  if (!fs.existsSync(subDir)) {
+    fs.mkdirSync(subDir, { recursive: true });
+  }
+});
+app.use('/documents', express.static(documentsDir));
+app.use('/api/documents', express.static(documentsDir));
 
 // API Routes
 app.use('/api/auth', authRoutes);

@@ -33,8 +33,10 @@ const documentItemSchema = new mongoose.Schema(
     fileName: { type: String, trim: true },
     fileType: { type: String, trim: true, default: 'application/pdf' },
     fileSize: { type: Number },
+    localPath: { type: String, trim: true },
+    storageType: { type: String, default: 'local' }, // 'local' (VPS server) or 'cloudinary'
     public_id: { type: String },
-    resourceType: { type: String, default: 'image' },
+    resourceType: { type: String, default: 'raw' },
     uploadedAt: { type: Date, default: Date.now },
   },
   { _id: false }
