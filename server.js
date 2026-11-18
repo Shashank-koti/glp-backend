@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 // Force IPv4 DNS resolution first on Windows to avoid IPv6 SRV timeouts
 try {
   dns.setDefaultResultOrder('ipv4first');
-} catch (e) {}
+} catch (e) { }
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

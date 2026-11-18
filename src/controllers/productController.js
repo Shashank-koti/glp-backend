@@ -123,13 +123,47 @@ export const getProducts = async (req, res, next) => {
 // @access  Public
 export const getProductBySlug = async (req, res, next) => {
   try {
+    const rawParam = (req.params.slug || '').trim();
+    // Extract base CAS if param contains extra text or salt notation, e.g. "55290-66-9 (HCl salt)" -> "55290-66-9"
+    const casMatch = rawParam.match(/\d{2,7}-\d{2}-\d/);
+    const cleanCas = casMatch ? casMatch[0] : rawParam.split('(')[0].trim();
+
+    const escapeRegex = (str) => str.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+    const escapedRaw = escapeRegex(rawParam);
+    const escapedClean = escapeRegex(cleanCas);
+
+    const orConditions = [
+      { slug: rawParam },
+      { slug: cleanCas },
+      { 'specifications.casNumber': rawParam },
+      { 'specifications.casNumber': cleanCas },
+      { 'specifications.alternateCas': rawParam },
+      { 'specifications.alternateCas': cleanCas },
+      { similarProducts: rawParam },
+      { similarProducts: cleanCas },
+    ];
+
+    if (escapedClean) {
+      orConditions.push(
+        { 'specifications.casNumber': { $regex: `^${escapedClean}(\\s*\\(.*\\)|;.*)?$`, $options: 'i' } },
+        { 'specifications.casNumber': { $regex: `(^|[;,\\s])${escapedClean}($|[;,\\s\\(])`, $options: 'i' } },
+        { 'specifications.alternateCas': { $regex: `^${escapedClean}(\\s*\\(.*\\)|;.*)?$`, $options: 'i' } },
+        { 'specifications.alternateCas': { $regex: `(^|[;,\\s])${escapedClean}($|[;,\\s\\(])`, $options: 'i' } },
+        { similarProducts: { $regex: `^${escapedClean}(\\s*\\(.*\\)|;.*)?$`, $options: 'i' } },
+        { similarProducts: { $regex: `(^|[;,\\s])${escapedClean}($|[;,\\s\\(])`, $options: 'i' } }
+      );
+    }
+
+    if (escapedRaw && escapedRaw !== escapedClean) {
+      orConditions.push(
+        { 'specifications.casNumber': { $regex: `^${escapedRaw}$`, $options: 'i' } },
+        { 'specifications.alternateCas': { $regex: `^${escapedRaw}$`, $options: 'i' } },
+        { similarProducts: { $regex: `^${escapedRaw}$`, $options: 'i' } }
+      );
+    }
+
     const subProduct = await SubProduct.findOne({
-      $or: [
-        { slug: req.params.slug },
-        { 'specifications.casNumber': req.params.slug },
-        { 'specifications.alternateCas': req.params.slug },
-        { similarProducts: req.params.slug },
-      ],
+      $or: orConditions,
       isActive: true
     })
       .populate('category', 'categoryName slug categoryId')
