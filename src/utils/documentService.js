@@ -1,5 +1,7 @@
 import fs from 'fs';
 import path from 'path';
+import https from 'https';
+import http from 'http';
 import cloudinary, { isCloudinaryConfigured } from '../config/cloudinary.js';
 
 export { isCloudinaryConfigured };
@@ -229,6 +231,119 @@ export const extractCloudinaryPublicId = (url) => {
   } catch (e) {
     return null;
   }
+};
+
+/**
+ * Migrates or downloads a document stored on Cloudinary using authenticated API access,
+ * saves it directly to the local VPS documents/{docType} directory,
+ * updates the product document in MongoDB, and returns the local file path.
+ *
+ * @param {Object} params
+ * @param {Object} params.doc - Document subdocument from product.documents[type]
+ * @param {string} params.docType - Canonical docType ('msds', 'draftCoa', 'coa')
+ * @param {Object} [params.product] - SubProduct mongoose document
+ * @returns {Promise<{ localPath: string, relativeUrl: string, fileName: string }>}
+ */
+export const migrateCloudinaryDocumentToLocal = async ({ doc, docType, product = null }) => {
+  if (!doc || !doc.url || !doc.url.includes('cloudinary.com')) {
+    throw new Error('Not a Cloudinary document URL.');
+  }
+
+  const normalized = normalizeDocType(docType) || 'msds';
+  const subFolder = getDocSubdirectory(normalized);
+  const documentsBase = getDocumentsDir();
+  const targetDir = path.join(documentsBase, subFolder);
+  if (!fs.existsSync(targetDir)) {
+    fs.mkdirSync(targetDir, { recursive: true });
+  }
+
+  const publicId = doc.public_id || extractCloudinaryPublicId(doc.url);
+  if (!publicId) {
+    throw new Error('Could not extract Cloudinary public ID from URL.');
+  }
+
+  const isRaw = doc.resourceType === 'raw' || doc.url.includes('/raw/upload/');
+  const resourceType = isRaw ? 'raw' : 'image';
+
+  // Generate authenticated signed download URL (valid for 1 hour)
+  const signedDownloadUrl = cloudinary.utils.private_download_url(publicId, 'pdf', {
+    resource_type: resourceType,
+    type: 'upload',
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+  });
+
+  const downloadBuffer = (url) => {
+    return new Promise((resolve, reject) => {
+      const client = url.startsWith('https://') ? https : http;
+      client.get(url, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          return downloadBuffer(res.headers.location).then(resolve).catch(reject);
+        }
+        if (res.statusCode !== 200) {
+          return reject(new Error(`Cloudinary returned HTTP status ${res.statusCode}`));
+        }
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+      }).on('error', reject);
+    });
+  };
+
+  let buffer;
+  try {
+    buffer = await downloadBuffer(signedDownloadUrl);
+  } catch (err) {
+    // If 'image' resource type failed, attempt with 'raw'
+    if (resourceType === 'image') {
+      const rawSignedUrl = cloudinary.utils.private_download_url(publicId, 'pdf', {
+        resource_type: 'raw',
+        type: 'upload',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+      });
+      buffer = await downloadBuffer(rawSignedUrl);
+    } else {
+      throw err;
+    }
+  }
+
+  const identifier = product?.slug || product?.p_link || path.basename(publicId).replace(/^glp_doc_/, '');
+  const cleanIdentifier = String(identifier).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
+  const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const serverFileName = `${subFolder.replace('-', '_')}_${cleanIdentifier}_${uniqueSuffix}.pdf`;
+  const targetFilePath = path.join(targetDir, serverFileName);
+
+  fs.writeFileSync(targetFilePath, buffer);
+  const relativeUrl = `/documents/${subFolder}/${serverFileName}`;
+
+  console.log(`[Auto-Migration] Transferred Cloudinary doc "${publicId}" to VPS storage: ${targetFilePath}`);
+
+  // Update product in MongoDB if provided
+  if (product) {
+    if (!product.documents) {
+      product.documents = { msds: null, draftCoa: null, coa: null };
+    }
+    product.documents[normalized] = {
+      url: relativeUrl,
+      fileName: doc.fileName || serverFileName,
+      fileType: doc.fileType || 'application/pdf',
+      fileSize: buffer.length,
+      localPath: targetFilePath,
+      storageType: 'local',
+      resourceType: 'raw',
+      uploadedAt: doc.uploadedAt || new Date(),
+    };
+    if (typeof product.markModified === 'function') {
+      product.markModified('documents');
+      await product.save();
+    }
+  }
+
+  return {
+    localPath: targetFilePath,
+    relativeUrl,
+    fileName: doc.fileName || serverFileName,
+    fileSize: buffer.length,
+  };
 };
 
 /**

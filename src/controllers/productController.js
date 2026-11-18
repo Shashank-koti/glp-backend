@@ -11,7 +11,11 @@ import {
   normalizeDocType,
   getDocTypeLabel,
   formatDocumentsForResponse,
+  migrateCloudinaryDocumentToLocal,
+  extractCloudinaryPublicId,
+  isCloudinaryConfigured,
 } from '../utils/documentService.js';
+import cloudinary from '../config/cloudinary.js';
 import slugGenerator from '../utils/slugGenerator.js';
 import { resolveCategoryDoc } from './crmProductController.js';
 
@@ -766,7 +770,34 @@ export const downloadProductDocument = async (req, res, next) => {
       }
     }
 
-    // 4. Remote file (Cloudinary, CDN, external) -> redirect to download/view
+    // 4. Remote Cloudinary file -> Automatically migrate to VPS documents folder and serve
+    if (doc.url && doc.url.includes('cloudinary.com')) {
+      try {
+        const migrated = await migrateCloudinaryDocumentToLocal({
+          doc,
+          docType: normalizedType,
+          product,
+        });
+        if (migrated && migrated.localPath && fs.existsSync(migrated.localPath)) {
+          return res.download(migrated.localPath, cleanFileName);
+        }
+      } catch (migErr) {
+        console.error('[Cloudinary Migration Error]:', migErr.message);
+        // Fallback: If migration to local disk encountered an error, redirect to authenticated signed download URL
+        const publicId = doc.public_id || extractCloudinaryPublicId(doc.url);
+        if (publicId && isCloudinaryConfigured()) {
+          const isRaw = doc.resourceType === 'raw' || doc.url.includes('/raw/upload/');
+          const signedUrl = cloudinary.utils.private_download_url(publicId, 'pdf', {
+            resource_type: isRaw ? 'raw' : 'image',
+            type: 'upload',
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+          });
+          return res.redirect(signedUrl);
+        }
+      }
+    }
+
+    // 5. Generic remote file (CDN, external) -> redirect to download/view
     if (doc.url && (doc.url.startsWith('http://') || doc.url.startsWith('https://'))) {
       return res.redirect(doc.url);
     }
