@@ -7,6 +7,10 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:restart": "pm2 restart ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop ecosystem.config.cjs",
+    "pm2:logs": "pm2 logs glp-backend",
     "seed:admin": "node scripts/adminData.js",
     "seed:client-logos": "node scripts/seedClientLogos.js",
     "test": "echo \"Error: no test specified\" && exit 1"

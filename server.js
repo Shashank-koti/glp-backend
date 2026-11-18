@@ -18,10 +18,17 @@ dotenv.config();
 import connectDB from './src/config/database.js';
 import app from './src/app.js';
 
-// Connect to database
-connectDB().catch((err) => {
-  console.error('Initial MongoDB Connection Error:', err.message);
-});
+// Connect to database with automatic retry
+const initDB = async () => {
+  try {
+    await connectDB();
+  } catch (err) {
+    console.error('Initial MongoDB Connection Error:', err.message);
+    console.log('[MongoDB] Retrying initial connection in 5 seconds...');
+    setTimeout(initDB, 5000);
+  }
+};
+initDB();
 
 const PORT = process.env.PORT || 5000;
 

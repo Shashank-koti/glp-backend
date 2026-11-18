@@ -30,6 +30,9 @@ dotenv.config();
 
 const app = express();
 
+// Trust reverse proxy (Nginx) on VPS to correctly read client IP (prevents all users sharing 127.0.0.1)
+app.set('trust proxy', 1);
+
 // Security HTTP headers
 app.use(
   helmet({
@@ -43,11 +46,17 @@ app.use(cors({
   credentials: true
 }));
 
-// Rate limiting (generous in development so rapid page reloads/Vite HMR are not throttled)
+// Rate limiting (realistic per-client thresholds; skips health check)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: process.env.NODE_ENV === 'production' ? 100 : 5000,
-  message: 'Too many requests from this IP, please try again in 15 minutes'
+  max: process.env.NODE_ENV === 'production' ? 2500 : 10000,
+  message: {
+    success: false,
+    message: 'Too many requests from this IP, please try again after 15 minutes'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === '/health' || req.originalUrl === '/api/health',
 });
 app.use('/api', limiter);
 

@@ -547,10 +547,10 @@ export const getProductSubProducts = async (req, res, next) => {
         },
         category: category
           ? {
-              _id: category._id,
-              categoryName: category.categoryName,
-              slug: category.slug,
-            }
+            _id: category._id,
+            categoryName: category.categoryName,
+            slug: category.slug,
+          }
           : null,
       },
       'SubProducts fetched successfully'

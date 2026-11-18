@@ -26,15 +26,20 @@ if (!cached) {
   cached = global.mongoose = { conn: null, promise: null };
 }
 
-// Connection lifecycle listeners (no auto-reconnect)
+// Connection lifecycle listeners
 mongoose.connection.on('connected', () => {
   console.log(`[MongoDB] Connected successfully to host: ${mongoose.connection.host}`);
 });
 
 mongoose.connection.on('disconnected', () => {
-  console.warn('[MongoDB] Disconnected from server.');
+  console.warn('[MongoDB] Disconnected from server. Attempting reconnect in 5 seconds...');
   cached.conn = null;
   cached.promise = null;
+  setTimeout(() => {
+    if (mongoose.connection.readyState === 0) {
+      connectDB().catch(e => console.error('[MongoDB Reconnect Attempt Failed]:', e.message));
+    }
+  }, 5000);
 });
 
 const connectDB = async () => {
