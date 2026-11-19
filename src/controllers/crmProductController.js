@@ -165,15 +165,20 @@ export const resolveCategoryDoc = async (categoryIdentifier) => {
   const slugified = slugGenerator(cleanStr);
   const nameSpaced = cleanStr.replace(/[-_]+/g, ' ');
 
+  const escapeRegex = (str) => str.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+  const safeClean = escapeRegex(cleanStr);
+  const safeSlugified = escapeRegex(slugified);
+  const safeNameSpaced = escapeRegex(nameSpaced);
+
   const doc = await Category.findOne({
     $or: [
       { slug: cleanStr },
       { slug: slugified },
-      { slug: { $regex: new RegExp(`^${cleanStr}$`, 'i') } },
-      { slug: { $regex: new RegExp(`^${slugified}$`, 'i') } },
+      { slug: { $regex: `^${safeClean}$`, $options: 'i' } },
+      { slug: { $regex: `^${safeSlugified}$`, $options: 'i' } },
       { categoryId: cleanStr },
-      { categoryName: { $regex: new RegExp(`^${nameSpaced}$`, 'i') } },
-      { categoryName: { $regex: new RegExp(`^${cleanStr}$`, 'i') } },
+      { categoryName: { $regex: `^${safeNameSpaced}$`, $options: 'i' } },
+      { categoryName: { $regex: `^${safeClean}$`, $options: 'i' } },
     ],
   });
 
@@ -349,8 +354,9 @@ export const crmCreateMainProduct = async (req, res, next) => {
     }
 
     // Check unique heading
+    const safeHeading = escapeRegex(heading.trim());
     const existingHeading = await Product.findOne({
-      heading: { $regex: new RegExp(`^${heading.trim()}$`, 'i') },
+      heading: { $regex: `^${safeHeading}$`, $options: 'i' },
     });
     if (existingHeading) {
       return res.status(400).json({
@@ -400,9 +406,10 @@ export const crmUpdateMainProduct = async (req, res, next) => {
 
     if (req.body.heading) {
       const trimmedHeading = req.body.heading.trim();
+      const safeHeading = escapeRegex(trimmedHeading);
       const existingHeading = await Product.findOne({
         _id: { $ne: product._id },
-        heading: { $regex: new RegExp(`^${trimmedHeading}$`, 'i') },
+        heading: { $regex: `^${safeHeading}$`, $options: 'i' },
       });
       if (existingHeading) {
         return res.status(400).json({

@@ -74,7 +74,12 @@ export const getCategoryProducts = async (req, res, next) => {
 
     // Support alphabet filtering on the heading
     if (req.query.letter && req.query.letter !== 'All') {
-      filter.heading = { $regex: new RegExp(`^${req.query.letter}`, 'i') };
+      if (req.query.letter === '#') {
+        filter.heading = { $regex: '^[^a-zA-Z]' };
+      } else {
+        const safeLetter = req.query.letter.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+        filter.heading = { $regex: `^${safeLetter}`, $options: 'i' };
+      }
     }
 
     // Default to a high limit if not paginating explicitly

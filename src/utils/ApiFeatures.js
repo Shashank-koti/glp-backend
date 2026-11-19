@@ -19,11 +19,12 @@ class ApiFeatures {
 
   search(searchFields) {
     if (this.queryString.search) {
-      const keyword = this.queryString.search;
+      const keyword = String(this.queryString.search).trim();
+      const safeKeyword = keyword.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
       const searchQuery = {
         $or: searchFields.map(field => ({
           [field]: {
-            $regex: keyword,
+            $regex: safeKeyword,
             $options: 'i',
           },
         })),

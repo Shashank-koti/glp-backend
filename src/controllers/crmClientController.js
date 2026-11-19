@@ -23,7 +23,8 @@ export const crmGetClients = async (req, res, next) => {
 
     // Search query matching name, company, email, phone, country
     if (search && search.trim()) {
-      const searchRegex = new RegExp(search.trim(), 'i');
+      const safeSearch = search.trim().replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+      const searchRegex = new RegExp(safeSearch, 'i');
       query.$or = [
         { clientName: searchRegex },
         { company: searchRegex },

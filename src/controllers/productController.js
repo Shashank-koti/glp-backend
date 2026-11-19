@@ -58,6 +58,8 @@ export const getProducts = async (req, res, next) => {
             { mainProduct: { $in: parentApisInCat } },
           ],
         };
+      } else {
+        baseFilter = { _id: null };
       }
       delete req.query.category;
     }
@@ -143,6 +145,7 @@ export const getProductBySlug = async (req, res, next) => {
     const escapedClean = escapeRegex(cleanCas);
 
     const orConditions = [
+      ...(mongoose.isValidObjectId(rawParam) ? [{ _id: rawParam }] : []),
       { slug: rawParam },
       { slug: cleanCas },
       { 'specifications.casNumber': rawParam },
@@ -356,9 +359,13 @@ export const getProductGroupsByCategory = async (req, res, next) => {
 
     let matchQuery = { category: category._id, isActive: true, subCategory: { $exists: true, $ne: '' } };
 
-    if (letter) {
-      // Create a regex to match the starting letter (case-insensitive)
-      matchQuery.subCategory = { $regex: new RegExp(`^${letter}`, 'i') };
+    if (letter && letter !== 'All') {
+      if (letter === '#') {
+        matchQuery.subCategory = { $regex: '^[^a-zA-Z]' };
+      } else {
+        const safeLetter = letter.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+        matchQuery.subCategory = { $regex: `^${safeLetter}`, $options: 'i' };
+      }
     }
 
     // Using aggregation to get distinct subCategories and perhaps count them
@@ -443,98 +450,109 @@ export const getProductSubProducts = async (req, res, next) => {
   try {
     const slugParam = req.params.slug;
 
-    // 1. Try to find the Main Product by slug
+    // 1. Check if slugParam resolves to a Category (e.g. Nitroso-Impurities, Peptides, Fine-Chemicals, etc.)
+    const categoryDoc = await resolveCategoryDoc(slugParam);
+
+    // 2. Also look for a matching Main Product by slug/heading
+    const safeSlugParam = slugParam ? slugParam.replace(/[-_]+/g, ' ').replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&') : '';
     let mainProduct = await Product.findOne({
       $or: [
         { p_link: slugParam },
         { p_link: slugParam.toLowerCase() },
         { p_link: slugGenerator(slugParam) },
-        { heading: { $regex: new RegExp(`^${slugParam.replace(/[-_]+/g, ' ')}$`, 'i') } },
+        { heading: { $regex: `^${safeSlugParam}$`, $options: 'i' } },
       ],
       status: true,
     }).populate('category');
 
-    // 2. If no main product found, check if slugParam is a Category (e.g. Fine-Chemicals, Nitroso-Impurities, etc.)
-    if (!mainProduct) {
-      const categoryDoc = await resolveCategoryDoc(slugParam);
-      if (categoryDoc) {
-        const parentApis = await Product.find({
-          $or: [{ category: categoryDoc._id }, { category_id: categoryDoc.categoryId }],
-          status: true,
-        });
-        const parentApiIds = parentApis.map((p) => p._id);
+    // If slugParam matches a Category, return all subproducts belonging to this category
+    // (including any parent APIs under this category or matching mainProduct)
+    if (categoryDoc) {
+      const parentApis = await Product.find({
+        $or: [{ category: categoryDoc._id }, { category_id: categoryDoc.categoryId }],
+        status: true,
+      });
+      const parentApiIds = parentApis.map((p) => p._id);
 
-        const filter = {
-          $or: [
-            { category: categoryDoc._id },
-            { category_id: categoryDoc.categoryId },
-            { mainProduct: { $in: parentApiIds } },
-          ],
-          isActive: true,
-        };
+      const filter = {
+        $or: [
+          { category: categoryDoc._id },
+          { category_id: categoryDoc.categoryId },
+          { mainProduct: { $in: parentApiIds } },
+          ...(mainProduct ? [{ mainProduct: mainProduct._id }] : []),
+        ],
+        isActive: true,
+      };
 
-        if (!req.query.limit) {
-          req.query.limit = '1000';
-        }
-
-        const features = new ApiFeatures(
-          SubProduct.find(filter)
-            .populate('category', 'categoryName slug categoryId')
-            .populate({
-              path: 'mainProduct',
-              select: 'heading p_link category category_id',
-              populate: {
-                path: 'category',
-                select: 'categoryName slug categoryId',
-              },
-            }),
-          req.query
-        )
-          .filter()
-          .sort()
-          .limitFields()
-          .paginate();
-
-        const subProducts = await features.query;
-        const total = await SubProduct.countDocuments(filter);
-
-        const formattedSubProducts = subProducts.map((sp) => {
-          const formatted = sp.toObject();
-          const cat = sp.category || sp.mainProduct?.category || categoryDoc;
-          if (cat) {
-            formatted.category = {
-              _id: cat._id,
-              categoryName: cat.categoryName,
-              slug: cat.slug,
-              categoryId: cat.categoryId || cat._id?.toString(),
-            };
-          }
-          return formatted;
-        });
-
-        return ResponseFormatter.successWithPagination(
-          res,
-          formattedSubProducts,
-          {
-            total,
-            count: formattedSubProducts.length,
-            page: parseInt(req.query.page) || 1,
-            mainProduct: {
-              heading: categoryDoc.categoryName,
-              slug: categoryDoc.slug,
-            },
-            category: {
-              _id: categoryDoc._id,
-              categoryName: categoryDoc.categoryName,
-              slug: categoryDoc.slug,
-              subtitle: categoryDoc.subtitle,
-              description: categoryDoc.description,
-            },
-          },
-          `SubProducts for category '${categoryDoc.categoryName}' fetched successfully`
-        );
+      if (!req.query.limit) {
+        req.query.limit = '2000';
       }
 
+      const features = new ApiFeatures(
+        SubProduct.find(filter)
+          .populate('category', 'categoryName slug categoryId')
+          .populate({
+            path: 'mainProduct',
+            select: 'heading p_link category category_id',
+            populate: {
+              path: 'category',
+              select: 'categoryName slug categoryId',
+            },
+          }),
+        req.query
+      )
+        .filter()
+        .sort()
+        .limitFields()
+        .paginate();
+
+      const subProducts = await features.query;
+      const total = await SubProduct.countDocuments(filter);
+
+      const formattedSubProducts = subProducts.map((sp) => {
+        const formatted = sp.toObject();
+        const cat = sp.category || sp.mainProduct?.category || categoryDoc;
+        if (cat) {
+          formatted.category = {
+            _id: cat._id,
+            categoryName: cat.categoryName,
+            slug: cat.slug,
+            categoryId: cat.categoryId || cat._id?.toString(),
+          };
+        }
+        return formatted;
+      });
+
+      return ResponseFormatter.successWithPagination(
+        res,
+        formattedSubProducts,
+        {
+          total,
+          count: formattedSubProducts.length,
+          page: parseInt(req.query.page) || 1,
+          mainProduct: mainProduct
+            ? {
+                heading: mainProduct.heading,
+                slug: mainProduct.p_link,
+                category: mainProduct.category,
+              }
+            : {
+                heading: categoryDoc.categoryName,
+                slug: categoryDoc.slug,
+              },
+          category: {
+            _id: categoryDoc._id,
+            categoryName: categoryDoc.categoryName,
+            slug: categoryDoc.slug,
+            subtitle: categoryDoc.subtitle,
+            description: categoryDoc.description,
+          },
+        },
+        `SubProducts for category '${categoryDoc.categoryName}' fetched successfully`
+      );
+    }
+
+    if (!mainProduct) {
       return res.status(404).json({ success: false, message: 'Main product or category not found' });
     }
 
